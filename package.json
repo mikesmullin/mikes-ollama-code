@@ -1,0 +1,24 @@
+{
+  "name": "ollama-chat",
+  "version": "1.0.0",
+  "description": "Interactive chat client for Ollama API",
+  "main": "ollama-chat.js",
+  "scripts": {
+    "start": "node ollama-chat.js",
+    "chat": "node ollama-chat.js"
+  },
+  "dependencies": {
+    "node-fetch": "^2.7.0"
+  },
+  "bin": {
+    "ollama-chat": "./ollama-chat.js"
+  },
+  "keywords": [
+    "ollama",
+    "chat",
+    "ai",
+    "cli"
+  ],
+  "author": "",
+  "license": "MIT"
+}
