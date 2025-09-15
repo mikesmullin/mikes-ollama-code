@@ -134,6 +134,52 @@ You can interact with the file system using specific function calls for listing,
 </function_calls>
 ```
 
+### XML Content Escaping
+
+**CRITICAL:** When including content within `<parameter name="content">` tags, you must properly escape XML/HTML special characters to ensure data integrity and prevent parsing errors.
+
+**Characters that MUST be escaped:**
+
+| Character | XML Entity | When to Use |
+|-----------|------------|-------------|
+| `<` | `&lt;` | Always escape in content |
+| `>` | `&gt;` | Always escape in content |
+| `&` | `&amp;` | Always escape in content |
+| `"` | `&quot;` | In attribute values |
+| `'` | `&apos;` | In attribute values |
+
+**Examples of proper escaping:**
+
+**Correct - HTML content with escaping:**
+```xml
+<parameter name="content">&lt;div class="container"&gt;
+  &lt;h1&gt;Title with &amp; Symbol&lt;/h1&gt;
+  &lt;p&gt;Use &quot;quotes&quot; properly&lt;/p&gt;
+&lt;/div&gt;</parameter>
+```
+
+**Correct - Code with XML/HTML tags:**
+```xml
+<parameter name="content">const template = `&lt;button onclick="alert('Hello')"&gt;
+  Click me &amp; see magic!
+&lt;/button&gt;`;</parameter>
+```
+
+**Correct - JSON with escaped characters:**
+```xml
+<parameter name="content">{
+  "message": "Use &quot;proper&quot; escaping &amp; avoid errors",
+  "html": "&lt;p&gt;Content here&lt;/p&gt;"
+}</parameter>
+```
+
+**WRONG - Unescaped content (will cause parsing errors):**
+```xml
+<parameter name="content"><div class="container">
+  <h1>This will break the XML parser</h1>
+</div></parameter>
+```
+
 ### Example Usage Patterns:
 
 **Explore project structure:**
@@ -180,11 +226,11 @@ You can interact with the file system using specific function calls for listing,
     <parameter name="filePath">C:\projects\myapp\src\components\Button.js</parameter>
     <parameter name="content">import React from 'react';
 
-const Button = ({ children, onClick }) => {
+const Button = ({ children, onClick }) =&gt; {
   return (
-    <button onClick={onClick}>
+    &lt;button onClick={onClick}&gt;
       {children}
-    </button>
+    &lt;/button&gt;
   );
 };
 
@@ -203,9 +249,9 @@ import './App.css';
 
 function App() {
   return (
-    <div className="App">
-      <h1>Hello World</h1>
-    </div>
+    &lt;div className="App"&gt;
+      &lt;h1&gt;Hello World&lt;/h1&gt;
+    &lt;/div&gt;
   );
 }</parameter>
     <parameter name="newString">import React from 'react';
@@ -214,12 +260,12 @@ import Button from './components/Button';
 
 function App() {
   return (
-    <div className="App">
-      <h1>Hello World</h1>
-      <Button onClick={() => alert('Clicked!')}>
+    &lt;div className="App"&gt;
+      &lt;h1&gt;Hello World&lt;/h1&gt;
+      &lt;Button onClick={() =&gt; alert('Clicked!')}&gt;
         Click Me
-      </Button>
-    </div>
+      &lt;/Button&gt;
+    &lt;/div&gt;
   );
 }</parameter>
   </invoke>
@@ -232,6 +278,7 @@ function App() {
 2. **Read before writing** - understand the current file structure before making changes
 3. **Use semantic search** for complex code exploration when you're not sure what to look for
 4. **Create directories automatically** - the create_file tool will create necessary parent directories
+5. **Always escape XML content** - use proper XML entities (`&lt;`, `&gt;`, `&amp;`, `&quot;`, `&apos;`) for any content containing special characters
 
 ### Response Handling:
 

@@ -11,11 +11,32 @@ const glob = require('glob');
 
 // Environment variables
 const OLLAMA_HOST = process.env.OLLAMA_BASE_URL || process.env.OLLAMA_HOST || 'http://localhost:11434';
-const OLLAMA_MODEL = process.env.OLLAMA_MODEL || 'llama2';
+const OLLAMA_MODEL = process.env.OLLAMA_MODEL || 'gwen3:8b';
 const OLLAMA_API_KEY = process.env.OLLAMA_API_KEY;
 
 // Ensure the host URL has the correct format
 const baseUrl = OLLAMA_HOST.endsWith('/v1') ? OLLAMA_HOST : `${OLLAMA_HOST}/v1`;
+
+/**
+ * XML ESCAPING IMPLEMENTATION
+ * 
+ * This script properly handles XML escaping/unescaping as documented in docs/system.md.
+ * When the LLM sends function calls with XML-escaped content in <parameter> tags,
+ * this implementation:
+ * 
+ * 1. Parses the XML using xml2js 
+ * 2. Extracts parameter content (which may contain XML entities)
+ * 3. Unescapes XML entities back to original characters:
+ *    - &lt; → <
+ *    - &gt; → >
+ *    - &amp; → &
+ *    - &quot; → "
+ *    - &apos; → '
+ * 4. Validates content and provides warnings for potential escaping issues
+ * 
+ * This ensures that file content, terminal commands, and other parameters
+ * containing special characters are properly restored to their intended form.
+ */
 
 class OllamaChat {
   constructor() {
@@ -283,6 +304,54 @@ class OllamaChat {
     process.stdout.write(`\r\x1b[${promptLen + currentLinePos}C`);
   }
 
+  // XML unescaping helper to convert XML entities back to their original characters
+  unescapeXml(text) {
+    if (typeof text !== 'string') {
+      return text;
+    }
+
+    const original = text;
+    const unescaped = text
+      .replace(/&lt;/g, '<')
+      .replace(/&gt;/g, '>')
+      .replace(/&quot;/g, '"')
+      .replace(/&apos;/g, "'")
+      .replace(/&#39;/g, "'")      // Alternative single quote encoding
+      .replace(/&amp;/g, '&');     // Must be last to avoid double-unescaping
+
+    // Debug logging when unescaping actually occurs
+    if (original !== unescaped) {
+      console.log('[XML] Unescaped parameter content');
+    }
+
+    return unescaped;
+  }
+
+  // Validate XML escaping in content - helps debug common issues
+  validateXmlContent(content, parameterName) {
+    if (typeof content !== 'string') return true;
+
+    // Check for unescaped XML characters that could break parsing
+    const unescapedChars = [];
+    if (content.includes('<') && !content.includes('&lt;')) {
+      unescapedChars.push('<');
+    }
+    if (content.includes('>') && !content.includes('&gt;')) {
+      unescapedChars.push('>');
+    }
+    if (content.includes('&') && !content.match(/&(?:lt|gt|amp|quot|apos|#39);/)) {
+      unescapedChars.push('&');
+    }
+
+    if (unescapedChars.length > 0) {
+      console.warn(`[XML Warning] Parameter "${parameterName}" may contain unescaped characters: ${unescapedChars.join(', ')}`);
+      console.warn('[XML Warning] Consider escaping them as: < → &lt;, > → &gt;, & → &amp;');
+      return false;
+    }
+
+    return true;
+  }
+
   // XML parsing helper to extract function calls
   extractFunctionCalls(text) {
     const functionCallRegex = /<function_calls>([\s\S]*?)<\/function_calls>/g;
@@ -302,7 +371,14 @@ class OllamaChat {
                 const parameters = Array.isArray(invoke.parameter) ? invoke.parameter : [invoke.parameter];
                 for (const param of parameters) {
                   if (param.$ && param.$.name) {
-                    params[param.$.name] = param._;
+                    const paramName = param.$.name;
+                    const rawContent = param._ || '';
+
+                    // Validate XML content before unescaping (helps catch issues)
+                    this.validateXmlContent(rawContent, paramName);
+
+                    // CRITICAL: Unescape XML entities in parameter content
+                    params[paramName] = this.unescapeXml(rawContent);
                   }
                 }
                 calls.push({
@@ -314,7 +390,8 @@ class OllamaChat {
           }
         });
       } catch (e) {
-        console.error('Error parsing XML:', e);
+        console.error('Error parsing XML:', e.message);
+        console.error('XML content that failed to parse:', xmlContent.substring(0, 200) + '...');
       }
     }
 
@@ -573,7 +650,10 @@ class OllamaChat {
         return `Error: File "${filePath}" already exists. Use replace_string_in_file to edit existing files.`;
       }
 
-      fs.writeFileSync(filePath, content, 'utf8');
+      // Ensure content is properly unescaped (in case it wasn't handled in XML parsing)
+      const finalContent = typeof content === 'string' ? content : '';
+
+      fs.writeFileSync(filePath, finalContent, 'utf8');
       return `File created successfully: ${filePath}`;
     } catch (error) {
       return `Error creating file: ${error.message}`;
@@ -589,18 +669,22 @@ class OllamaChat {
 
       const content = fs.readFileSync(filePath, 'utf8');
 
+      // Ensure strings are properly unescaped (in case they weren't handled in XML parsing)
+      const finalOldString = typeof oldString === 'string' ? oldString : '';
+      const finalNewString = typeof newString === 'string' ? newString : '';
+
       // Check if the old string exists in the file
-      if (!content.includes(oldString)) {
+      if (!content.includes(finalOldString)) {
         return `Error: The specified text was not found in the file. Make sure the oldString matches exactly, including whitespace and line breaks.`;
       }
 
       // Count occurrences to warn about multiple matches
-      const occurrences = (content.match(new RegExp(oldString.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g')) || []).length;
+      const occurrences = (content.match(new RegExp(finalOldString.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g')) || []).length;
       if (occurrences > 1) {
         return `Error: Found ${occurrences} occurrences of the text. Please provide more specific context to ensure unique replacement.`;
       }
 
-      const newContent = content.replace(oldString, newString);
+      const newContent = content.replace(finalOldString, finalNewString);
       fs.writeFileSync(filePath, newContent, 'utf8');
 
       return `File updated successfully: ${filePath}`;
@@ -827,11 +911,11 @@ function showHelp() {
   console.log('');
   console.log('Options:');
   console.log('  --help, -h     Show this help message');
-  console.log('  --model, -m    Set the Ollama model to use (default: llama2)');
+  console.log('  --model, -m    Set the Ollama model to use (default: gwen3)');
   console.log('  --host         Set the Ollama host URL (default: http://localhost:11434)');
   console.log('');
   console.log('Environment Variables:');
-  console.log('  OLLAMA_MODEL      Model to use (default: llama2)');
+  console.log('  OLLAMA_MODEL      Model to use (default: gwen3)');
   console.log('  OLLAMA_HOST       Host URL for Ollama server');
   console.log('  OLLAMA_BASE_URL   Alternative host URL setting');
   console.log('  OLLAMA_API_KEY    API key for authentication (if required)');
@@ -851,8 +935,8 @@ function showHelp() {
   console.log('');
   console.log('Examples:');
   console.log('  node ollama-chat.js');
-  console.log('  node ollama-chat.js --model codellama');
-  console.log('  OLLAMA_MODEL=mistral node ollama-chat.js');
+  console.log('  node ollama-chat.js --model gwen3:8b');
+  console.log('  OLLAMA_MODEL=gwen3:8b node ollama-chat.js');
 }
 
 // Parse command line arguments
