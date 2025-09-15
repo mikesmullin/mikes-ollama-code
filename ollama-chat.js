@@ -24,6 +24,14 @@ class OllamaChat {
     this.conversationHistory = []; // Add conversation memory
     this.backgroundProcesses = new Map(); // Store background processes by ID
     this.nextProcessId = 1; // Auto-incrementing process ID
+
+    // Paste detection variables
+    this.pasteBuffer = '';
+    this.lastKeypressTime = 0;
+    this.pasteTimeout = null;
+    this.isPasting = false;
+    this.pasteThreshold = 10; // Milliseconds between keypress events to consider it pasting
+
     this.loadSystemInstructions(); // Load system instructions on startup
     this.setupReadline();
   }
@@ -65,6 +73,9 @@ class OllamaChat {
   handleKeypress(str, key) {
     if (!key) return;
 
+    const currentTime = Date.now();
+    const timeSinceLastKeypress = currentTime - this.lastKeypressTime;
+
     // Handle Ctrl+C to exit
     if (key.ctrl && key.name === 'c') {
       process.stdout.write('\n');
@@ -81,11 +92,24 @@ class OllamaChat {
       return;
     }
 
+    // Detect potential paste operation (rapid sequence of characters)
+    if (str && str.length === 1 && timeSinceLastKeypress < this.pasteThreshold && !key.ctrl && !key.alt && !key.meta) {
+      this.handlePossiblePaste(str);
+      this.lastKeypressTime = currentTime;
+      return;
+    }
+
+    // If we were pasting and now got a different type of input, finalize the paste
+    if (this.isPasting) {
+      this.finalizePaste();
+    }
+
     // Handle Alt+Enter for multiline - try multiple approaches
     // On Windows, Alt key shows up as meta: true instead of alt: true
     if ((key.alt || key.meta) && (key.name === 'return' || key.name === 'enter')) {
       this.insertAtCursor('\n');
       this.redrawLine();
+      this.lastKeypressTime = currentTime;
       return;
     }
 
@@ -94,11 +118,12 @@ class OllamaChat {
       console.log('alt+enter detected via char code');
       this.insertAtCursor('\n');
       this.redrawLine();
+      this.lastKeypressTime = currentTime;
       return;
     }
 
-    // Handle regular Enter to send message
-    if ((key.name === 'return' || key.name === 'enter') && !key.alt && !key.ctrl && !key.meta) {
+    // Handle regular Enter to send message (only if not pasting)
+    if ((key.name === 'return' || key.name === 'enter') && !key.alt && !key.ctrl && !key.meta && !this.isPasting) {
       if (this.currentInput.trim()) {
         process.stdout.write('\n');
         this.sendMessage(this.currentInput);
@@ -108,6 +133,7 @@ class OllamaChat {
         process.stdout.write('\n');
         this.showPrompt();
       }
+      this.lastKeypressTime = currentTime;
       return;
     }
 
@@ -119,6 +145,7 @@ class OllamaChat {
         this.cursorPos--;
         this.redrawLine();
       }
+      this.lastKeypressTime = currentTime;
       return;
     }
 
@@ -129,6 +156,7 @@ class OllamaChat {
           this.currentInput.slice(this.cursorPos + 1);
         this.redrawLine();
       }
+      this.lastKeypressTime = currentTime;
       return;
     }
 
@@ -138,6 +166,7 @@ class OllamaChat {
         this.cursorPos--;
         process.stdout.write('\x1b[D'); // Move cursor left
       }
+      this.lastKeypressTime = currentTime;
       return;
     }
 
@@ -147,6 +176,7 @@ class OllamaChat {
         this.cursorPos++;
         process.stdout.write('\x1b[C'); // Move cursor right
       }
+      this.lastKeypressTime = currentTime;
       return;
     }
 
@@ -157,6 +187,7 @@ class OllamaChat {
       if (moveLeft > 0) {
         process.stdout.write(`\x1b[${moveLeft}D`); // Move cursor left by moveLeft positions
       }
+      this.lastKeypressTime = currentTime;
       return;
     }
 
@@ -167,14 +198,17 @@ class OllamaChat {
       if (moveRight > 0) {
         process.stdout.write(`\x1b[${moveRight}C`); // Move cursor right by moveRight positions
       }
+      this.lastKeypressTime = currentTime;
       return;
     }
 
-    // Handle regular printable characters
+    // Handle regular printable characters (but not during paste)
     if (str && str.length === 1 && !key.ctrl && !key.alt && !key.meta) {
       this.insertAtCursor(str);
       this.redrawLine();
     }
+
+    this.lastKeypressTime = currentTime;
   }
 
   insertAtCursor(text) {
@@ -182,6 +216,46 @@ class OllamaChat {
       text +
       this.currentInput.slice(this.cursorPos);
     this.cursorPos += text.length;
+  }
+
+  handlePossiblePaste(char) {
+    // Start paste mode if not already pasting
+    if (!this.isPasting) {
+      this.isPasting = true;
+      this.pasteBuffer = '';
+    }
+
+    // Add character to paste buffer
+    this.pasteBuffer += char;
+
+    // Clear any existing timeout
+    if (this.pasteTimeout) {
+      clearTimeout(this.pasteTimeout);
+    }
+
+    // Set a timeout to finalize the paste after a short delay
+    this.pasteTimeout = setTimeout(() => {
+      this.finalizePaste();
+    }, 50); // 50ms delay to allow for complete paste
+  }
+
+  finalizePaste() {
+    if (!this.isPasting || !this.pasteBuffer) {
+      return;
+    }
+
+    // Insert all pasted content at once
+    this.insertAtCursor(this.pasteBuffer);
+    this.redrawLine();
+
+    // Reset paste state
+    this.isPasting = false;
+    this.pasteBuffer = '';
+
+    if (this.pasteTimeout) {
+      clearTimeout(this.pasteTimeout);
+      this.pasteTimeout = null;
+    }
   }
 
   redrawLine() {
@@ -742,6 +816,73 @@ class OllamaChat {
     console.log('  Ctrl+C: Exit\n');
 
     this.showPrompt();
+  }
+}
+
+// Handle command line arguments
+function showHelp() {
+  console.log('Ollama Chat - Interactive command-line chat interface for Ollama');
+  console.log('');
+  console.log('Usage: node ollama-chat.js [options]');
+  console.log('');
+  console.log('Options:');
+  console.log('  --help, -h     Show this help message');
+  console.log('  --model, -m    Set the Ollama model to use (default: llama2)');
+  console.log('  --host         Set the Ollama host URL (default: http://localhost:11434)');
+  console.log('');
+  console.log('Environment Variables:');
+  console.log('  OLLAMA_MODEL      Model to use (default: llama2)');
+  console.log('  OLLAMA_HOST       Host URL for Ollama server');
+  console.log('  OLLAMA_BASE_URL   Alternative host URL setting');
+  console.log('  OLLAMA_API_KEY    API key for authentication (if required)');
+  console.log('');
+  console.log('Interactive Commands:');
+  console.log('  Enter             Send message to the AI');
+  console.log('  Alt+Enter         Insert new line (for multi-line messages)');
+  console.log('  Ctrl+L            Clear conversation history');
+  console.log('  Ctrl+C            Exit the application');
+  console.log('');
+  console.log('Features:');
+  console.log('  • Multi-line input support with proper paste handling');
+  console.log('  • Conversation history and context preservation');
+  console.log('  • File system operations (read, write, search files)');
+  console.log('  • Terminal command execution');
+  console.log('  • System instructions from docs/system.md');
+  console.log('');
+  console.log('Examples:');
+  console.log('  node ollama-chat.js');
+  console.log('  node ollama-chat.js --model codellama');
+  console.log('  OLLAMA_MODEL=mistral node ollama-chat.js');
+}
+
+// Parse command line arguments
+const args = process.argv.slice(2);
+for (let i = 0; i < args.length; i++) {
+  const arg = args[i];
+
+  if (arg === '--help' || arg === '-h') {
+    showHelp();
+    process.exit(0);
+  } else if (arg === '--model' || arg === '-m') {
+    if (i + 1 < args.length) {
+      process.env.OLLAMA_MODEL = args[i + 1];
+      i++; // Skip the next argument as it's the model name
+    } else {
+      console.error('Error: --model requires a model name');
+      process.exit(1);
+    }
+  } else if (arg === '--host') {
+    if (i + 1 < args.length) {
+      process.env.OLLAMA_HOST = args[i + 1];
+      i++; // Skip the next argument as it's the host URL
+    } else {
+      console.error('Error: --host requires a URL');
+      process.exit(1);
+    }
+  } else {
+    console.error(`Error: Unknown argument '${arg}'`);
+    console.error('Use --help to see available options');
+    process.exit(1);
   }
 }
 

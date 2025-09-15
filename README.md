@@ -10,6 +10,11 @@ ollama serve
 ## Setup Podman in WSL2
 
 ```sh
+# from windows
+podman machine start
+
+
+# from wsl2 ubuntu
 sudo apt install podman-remote
 alias podman=podman-remote
 podman --version
