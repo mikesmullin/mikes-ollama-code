@@ -9,6 +9,39 @@ const fs = require('fs');
 const path = require('path');
 const glob = require('glob');
 
+// ANSI color codes for terminal formatting
+const Colors = {
+  // Reset
+  RESET: '\x1b[0m',
+  BRIGHT: '\x1b[1m',
+  DIM: '\x1b[2m',
+
+  // Colors
+  RED: '\x1b[31m',
+  GREEN: '\x1b[32m',
+  YELLOW: '\x1b[33m',
+  BLUE: '\x1b[34m',
+  MAGENTA: '\x1b[35m',
+  CYAN: '\x1b[36m',
+  WHITE: '\x1b[37m',
+
+  // Background colors
+  BG_RED: '\x1b[41m',
+  BG_GREEN: '\x1b[42m',
+  BG_YELLOW: '\x1b[43m',
+  BG_BLUE: '\x1b[44m',
+  BG_MAGENTA: '\x1b[45m',
+  BG_CYAN: '\x1b[46m',
+
+  // Specific styling for conversation elements
+  USER_PROMPT: '\x1b[36m',      // Cyan for user input
+  LLM_THINKING: '\x1b[2m\x1b[33m', // Dim yellow for thinking
+  LLM_RESPONSE: '\x1b[32m',     // Green for LLM response
+  FUNCTION_CALL: '\x1b[35m',    // Magenta for function calls
+  FUNCTION_RESULT: '\x1b[34m',  // Blue for function results
+  SYSTEM_MSG: '\x1b[2m\x1b[37m' // Dim white for system messages
+};
+
 // Environment variables
 const OLLAMA_HOST = process.env.OLLAMA_BASE_URL || process.env.OLLAMA_HOST || 'http://localhost:11434';
 const OLLAMA_MODEL = process.env.OLLAMA_MODEL || 'gwen3:8b';
@@ -68,13 +101,13 @@ class OllamaChat {
           role: 'system',
           content: systemContent
         });
-        console.log('[System instructions loaded from docs/system.md]');
-        console.log('[File system operations: list_dir, file_search, grep_search, read_file, create_file, replace_string_in_file]');
+        console.log(this.formatSystemMessage('System instructions loaded from docs/system.md'));
+        console.log(this.formatSystemMessage('File system operations: list_dir, file_search, grep_search, read_file, create_file, replace_string_in_file'));
       } else {
-        console.log('[No system instructions found at docs/system.md]');
+        console.log(this.formatSystemMessage('No system instructions found at docs/system.md'));
       }
     } catch (error) {
-      console.log(`[Error loading system instructions: ${error.message}]`);
+      console.log(this.formatSystemMessage(`Error loading system instructions: ${error.message}`));
     }
   }
 
@@ -108,13 +141,22 @@ class OllamaChat {
       // Preserve system instructions while clearing conversation
       const systemMessages = this.conversationHistory.filter(msg => msg.role === 'system');
       this.conversationHistory = systemMessages;
-      process.stdout.write('\n[Conversation history cleared]\n');
+      // Reset stream state
+      this.streamState = null;
+      process.stdout.write('\n' + this.formatSystemMessage('Conversation history cleared') + '\n');
       this.showPrompt();
       return;
     }
 
-    // Detect potential paste operation (rapid sequence of characters)
+    // Detect potential paste operation (rapid sequence of characters or line endings)
     if (str && str.length === 1 && timeSinceLastKeypress < this.pasteThreshold && !key.ctrl && !key.alt && !key.meta) {
+      this.handlePossiblePaste(str);
+      this.lastKeypressTime = currentTime;
+      return;
+    }
+
+    // Also handle line endings during paste operations
+    if (str === '\n' && timeSinceLastKeypress < this.pasteThreshold && !key.ctrl && !key.alt && !key.meta) {
       this.handlePossiblePaste(str);
       this.lastKeypressTime = currentTime;
       return;
@@ -246,6 +288,12 @@ class OllamaChat {
       this.pasteBuffer = '';
     }
 
+    // Handle line endings properly - convert \r\n and \r to \n
+    if (char === '\r') {
+      // Don't add standalone \r, wait for potential \n
+      return;
+    }
+
     // Add character to paste buffer
     this.pasteBuffer += char;
 
@@ -284,9 +332,11 @@ class OllamaChat {
     process.stdout.write('\r\x1b[K'); // Clear line
     const prompt = this.currentInput.includes('\n') ? '... ' : '>>> ';
 
-    // Display the input with proper newline handling
+    // Display the input with proper newline handling and color
     const displayInput = this.currentInput.replace(/\n/g, '\n... ');
-    process.stdout.write(prompt + displayInput);
+    const coloredPrompt = this.formatUserInput(prompt);
+    const coloredInput = this.formatUserInput(displayInput);
+    process.stdout.write(coloredPrompt + coloredInput);
 
     // Calculate cursor position after newlines
     const lines = this.currentInput.slice(0, this.cursorPos).split('\n');
@@ -302,6 +352,48 @@ class OllamaChat {
     // Move to correct column (accounting for prompt)
     const promptLen = totalLines === 1 ? 4 : 4; // '>>> ' or '... '
     process.stdout.write(`\r\x1b[${promptLen + currentLinePos}C`);
+  }
+
+  // Color and formatting helper methods
+  formatUserInput(text) {
+    return `${Colors.USER_PROMPT}${text}${Colors.RESET}`;
+  }
+
+  formatLLMThinking(text) {
+    const header = `${Colors.LLM_THINKING}${Colors.BRIGHT}┌─ LLM THINKING ─────────────────────────────────────────┐${Colors.RESET}`;
+    const footer = `${Colors.LLM_THINKING}${Colors.BRIGHT}└────────────────────────────────────────────────────────┘${Colors.RESET}`;
+    const content = text.split('\n').map(line =>
+      `${Colors.LLM_THINKING}│ ${line.padEnd(54)}${Colors.RESET}`
+    ).join('\n');
+    return `\n${header}\n${content}\n${footer}\n`;
+  }
+
+  formatLLMResponse(text) {
+    return `${Colors.LLM_RESPONSE}${text}${Colors.RESET}`;
+  }
+
+  formatFunctionCall(text) {
+    const header = `${Colors.FUNCTION_CALL}${Colors.BRIGHT}╔═ FUNCTION CALL ═══════════════════════════════════════╗${Colors.RESET}`;
+    const footer = `${Colors.FUNCTION_CALL}${Colors.BRIGHT}╚═══════════════════════════════════════════════════════╝${Colors.RESET}`;
+    const lines = text.split('\n');
+    const content = lines.map(line =>
+      `${Colors.FUNCTION_CALL}║ ${line.padEnd(53)} ║${Colors.RESET}`
+    ).join('\n');
+    return `\n${header}\n${content}\n${footer}\n`;
+  }
+
+  formatFunctionResult(text) {
+    const header = `${Colors.FUNCTION_RESULT}${Colors.BRIGHT}╭── FUNCTION RESULT ──────────────────────────────────────╮${Colors.RESET}`;
+    const footer = `${Colors.FUNCTION_RESULT}${Colors.BRIGHT}╰─────────────────────────────────────────────────────────╯${Colors.RESET}`;
+    const lines = text.split('\n');
+    const content = lines.map(line =>
+      `${Colors.FUNCTION_RESULT}│ ${line.padEnd(55)} │${Colors.RESET}`
+    ).join('\n');
+    return `\n${header}\n${content}\n${footer}\n`;
+  }
+
+  formatSystemMessage(text) {
+    return `${Colors.SYSTEM_MSG}[${text}]${Colors.RESET}`;
   }
 
   // XML unescaping helper to convert XML entities back to their original characters
@@ -321,7 +413,7 @@ class OllamaChat {
 
     // Debug logging when unescaping actually occurs
     if (original !== unescaped) {
-      console.log('[XML] Unescaped parameter content');
+      console.log(this.formatSystemMessage('XML: Unescaped parameter content'));
     }
 
     return unescaped;
@@ -344,8 +436,10 @@ class OllamaChat {
     }
 
     if (unescapedChars.length > 0) {
-      console.warn(`[XML Warning] Parameter "${parameterName}" may contain unescaped characters: ${unescapedChars.join(', ')}`);
-      console.warn('[XML Warning] Consider escaping them as: < → &lt;, > → &gt;, & → &amp;');
+      const warning1 = this.formatSystemMessage(`XML Warning: Parameter "${parameterName}" may contain unescaped characters: ${unescapedChars.join(', ')}`);
+      const warning2 = this.formatSystemMessage('XML Warning: Consider escaping them as: < → &lt;, > → &gt;, & → &amp;');
+      console.warn(warning1);
+      console.warn(warning2);
       return false;
     }
 
@@ -400,8 +494,10 @@ class OllamaChat {
 
   // Execute terminal command
   async runInTerminal(command, explanation, isBackground = false) {
-    console.log(`\n[Executing: ${explanation}]`);
-    console.log(`Command: ${command}\n`);
+    const formattedMsg = this.formatSystemMessage(`Executing: ${explanation}`);
+    console.log(`\n${formattedMsg}`);
+    const formattedCmd = this.formatSystemMessage(`Command: ${command}`);
+    console.log(`${formattedCmd}\n`);
 
     return new Promise((resolve) => {
       // Determine shell based on OS
@@ -749,6 +845,121 @@ class OllamaChat {
     return results;
   }
 
+  // Process streaming content with special formatting for different types
+  processStreamContent(content) {
+    // Track state for special content blocks
+    if (!this.streamState) {
+      this.streamState = {
+        isInThinkingTag: false,
+        thinkingContent: '',
+        isInFunctionCall: false,
+        functionCallContent: '',
+        regularContent: ''
+      };
+    }
+
+    // Add content to our buffer
+    this.streamState.regularContent += content;
+
+    // Check for thinking tags
+    if (!this.streamState.isInThinkingTag && this.streamState.regularContent.includes('<think>')) {
+      // Extract content before thinking tag
+      const parts = this.streamState.regularContent.split('<think>');
+      const beforeThink = parts[0];
+      if (beforeThink) {
+        process.stdout.write(this.formatLLMResponse(beforeThink));
+      }
+
+      // Start thinking mode
+      this.streamState.isInThinkingTag = true;
+      this.streamState.thinkingContent = parts.slice(1).join('<think>');
+      this.streamState.regularContent = '';
+
+      // Debug log
+      console.log(this.formatSystemMessage('DEBUG: Started thinking mode'));
+    }
+
+    if (this.streamState.isInThinkingTag) {
+      // Add new content to thinking buffer
+      this.streamState.thinkingContent += content;
+
+      if (this.streamState.thinkingContent.includes('</think>')) {
+        // End of thinking tag
+        const parts = this.streamState.thinkingContent.split('</think>');
+        const thinkingText = parts[0];
+
+        // Display thinking content with special formatting
+        if (thinkingText.trim()) {
+          process.stdout.write(this.formatLLMThinking(thinkingText));
+        }
+
+        // Continue with content after thinking tag
+        this.streamState.isInThinkingTag = false;
+        this.streamState.thinkingContent = '';
+        this.streamState.regularContent = parts.slice(1).join('</think>');
+
+        // Process any remaining content recursively
+        if (this.streamState.regularContent) {
+          const remaining = this.streamState.regularContent;
+          this.streamState.regularContent = '';
+          this.processStreamContent(remaining);
+        }
+      }
+      return; // Don't output thinking content directly
+    }
+
+    // Check for function calls
+    if (!this.streamState.isInFunctionCall && this.streamState.regularContent.includes('<function_calls>')) {
+      // Extract content before function call
+      const parts = this.streamState.regularContent.split('<function_calls>');
+      const beforeFunction = parts[0];
+      if (beforeFunction) {
+        process.stdout.write(this.formatLLMResponse(beforeFunction));
+      }
+
+      // Start function call mode
+      this.streamState.isInFunctionCall = true;
+      this.streamState.functionCallContent = '<function_calls>' + parts.slice(1).join('<function_calls>');
+      this.streamState.regularContent = '';
+
+      // Debug log
+      console.log(this.formatSystemMessage('DEBUG: Started function call mode'));
+    }
+
+    if (this.streamState.isInFunctionCall) {
+      // Add new content to function call buffer
+      this.streamState.functionCallContent += content;
+
+      if (this.streamState.functionCallContent.includes('</function_calls>')) {
+        // End of function call
+        const parts = this.streamState.functionCallContent.split('</function_calls>');
+        const functionCallText = parts[0] + '</function_calls>';
+
+        // Display function call with special formatting
+        process.stdout.write(this.formatFunctionCall(functionCallText));
+
+        // Continue with content after function call
+        this.streamState.isInFunctionCall = false;
+        this.streamState.functionCallContent = '';
+        this.streamState.regularContent = parts.slice(1).join('</function_calls>');
+
+        // Process any remaining content recursively
+        if (this.streamState.regularContent) {
+          const remaining = this.streamState.regularContent;
+          this.streamState.regularContent = '';
+          this.processStreamContent(remaining);
+        }
+      }
+      return; // Don't output function call content directly
+    }
+
+    // Regular LLM response content
+    if (this.streamState.regularContent && !this.streamState.isInThinkingTag && !this.streamState.isInFunctionCall) {
+      process.stdout.write(this.formatLLMResponse(this.streamState.regularContent));
+      this.streamState.regularContent = '';
+    }
+  }
+
   async sendMessage(message) {
     // Add user message to conversation history (only if it's not empty)
     if (message.trim()) {
@@ -757,6 +968,9 @@ class OllamaChat {
         content: message
       });
     }
+
+    // Reset stream state for new conversation
+    this.streamState = null;
 
     try {
       const headers = {
@@ -796,6 +1010,19 @@ class OllamaChat {
           if (line.startsWith('data: ')) {
             const data = line.slice(6);
             if (data === '[DONE]') {
+              // Handle any remaining content in stream state
+              if (this.streamState) {
+                if (this.streamState.isInThinkingTag && this.streamState.thinkingContent) {
+                  process.stdout.write(this.formatLLMThinking(this.streamState.thinkingContent));
+                }
+                if (this.streamState.isInFunctionCall && this.streamState.functionCallContent) {
+                  process.stdout.write(this.formatFunctionCall(this.streamState.functionCallContent));
+                }
+                if (this.streamState.regularContent) {
+                  process.stdout.write(this.formatLLMResponse(this.streamState.regularContent));
+                }
+              }
+
               // Add assistant response to conversation history
               if (assistantResponse.trim()) {
                 this.conversationHistory.push({
@@ -813,7 +1040,9 @@ class OllamaChat {
               const content = parsed.choices?.[0]?.delta?.content;
               if (content) {
                 assistantResponse += content; // Collect the response
-                process.stdout.write(content);
+
+                // Handle different types of content with special formatting
+                this.processStreamContent(content);
               }
 
               // Check if this is the last chunk
@@ -830,7 +1059,7 @@ class OllamaChat {
                 this.processFunctionCalls(assistantResponse).then((functionResults) => {
                   if (functionResults) {
                     // Send function results back to the LLM for processing
-                    process.stdout.write(functionResults);
+                    process.stdout.write(this.formatFunctionResult(functionResults));
 
                     // Add function results to conversation and get LLM's response
                     this.conversationHistory.push({
@@ -855,9 +1084,7 @@ class OllamaChat {
             }
           }
         }
-      });
-
-      reader.on('end', () => {
+      }); reader.on('end', () => {
         // Add assistant response to conversation history if we have one
         // (only if it wasn't already added in the finish_reason handler)
         if (assistantResponse.trim() &&
@@ -887,12 +1114,12 @@ class OllamaChat {
   }
 
   showPrompt() {
-    process.stdout.write('>>> ');
+    process.stdout.write(this.formatUserInput('>>> '));
   }
 
   start() {
-    console.log(`Ollama Chat - Model: ${OLLAMA_MODEL}`);
-    console.log(`Host: ${baseUrl}`);
+    console.log(`${Colors.BRIGHT}Ollama Chat - Model: ${OLLAMA_MODEL}${Colors.RESET}`);
+    console.log(`${Colors.BRIGHT}Host: ${baseUrl}${Colors.RESET}`);
     console.log('Commands:');
     console.log('  Enter: Send message');
     console.log('  Alt+Enter: New line');
