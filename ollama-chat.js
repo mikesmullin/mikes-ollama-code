@@ -254,7 +254,7 @@ class OllamaChat {
       // Determine shell based on OS
       const isWindows = process.platform === 'win32';
       const shell = isWindows ? 'cmd.exe' : '/bin/bash';
-      const shellArgs = isWindows ? ['/c', command] : ['-c', command];
+      const shellArgs = isWindows ? ['/c', command] : ['-l', '-c', command];
 
       const childProcess = spawn(shell, shellArgs, {
         stdio: ['pipe', 'pipe', 'pipe'],
@@ -269,7 +269,7 @@ class OllamaChat {
         const output = data.toString();
         stdout += output;
         if (!isBackground) {
-          process.stdout.write(output);
+          // process.stdout.write(output);
         }
       });
 
@@ -277,7 +277,7 @@ class OllamaChat {
         const output = data.toString();
         stderr += output;
         if (!isBackground) {
-          process.stderr.write(output);
+          // process.stderr.write(output);
         }
       });
 
@@ -480,38 +480,23 @@ class OllamaChat {
 
       reader.on('end', () => {
         // Add assistant response to conversation history if we have one
-        if (assistantResponse.trim()) {
+        // (only if it wasn't already added in the finish_reason handler)
+        if (assistantResponse.trim() &&
+          (!this.conversationHistory.length ||
+            this.conversationHistory[this.conversationHistory.length - 1].content !== assistantResponse.trim())) {
           this.conversationHistory.push({
             role: 'assistant',
             content: assistantResponse.trim()
           });
         }
 
-        // Process any function calls in the response
-        this.processFunctionCalls(assistantResponse).then((functionResults) => {
-          if (functionResults) {
-            // Send function results back to the LLM for processing
-            process.stdout.write(functionResults);
-
-            // Add function results to conversation and get LLM's response
-            this.conversationHistory.push({
-              role: 'user',
-              content: functionResults
-            });
-
-            // Recursively call sendMessage to get LLM's response to the function results
-            setTimeout(() => {
-              this.sendMessage('');
-            }, 100);
-            return;
-          }
-
+        // Only show prompt if no function calls were processed
+        // (function call processing handles its own prompt display)
+        if (!this.extractFunctionCalls(assistantResponse).length) {
           process.stdout.write('\n');
           this.showPrompt();
-        });
-      });
-
-      reader.on('error', (err) => {
+        }
+      }); reader.on('error', (err) => {
         console.error('\nError reading response:', err.message);
         this.showPrompt();
       });
