@@ -3,6 +3,10 @@
 const readline = require('readline');
 const fetch = require('node-fetch');
 const process = require('process');
+const { spawn } = require('child_process');
+const xml2js = require('xml2js');
+const fs = require('fs');
+const path = require('path');
 
 // Environment variables
 const OLLAMA_HOST = process.env.OLLAMA_BASE_URL || process.env.OLLAMA_HOST || 'http://localhost:11434';
@@ -17,7 +21,30 @@ class OllamaChat {
     this.currentInput = '';
     this.cursorPos = 0;
     this.conversationHistory = []; // Add conversation memory
+    this.backgroundProcesses = new Map(); // Store background processes by ID
+    this.nextProcessId = 1; // Auto-incrementing process ID
+    this.loadSystemInstructions(); // Load system instructions on startup
     this.setupReadline();
+  }
+
+  loadSystemInstructions() {
+    try {
+      const systemPath = path.join(__dirname, 'docs', 'system.md');
+      if (fs.existsSync(systemPath)) {
+        const systemContent = fs.readFileSync(systemPath, 'utf8');
+        // Add system instructions as the first message in conversation history
+        // This will be sent to the LLM but not displayed to the user
+        this.conversationHistory.push({
+          role: 'system',
+          content: systemContent
+        });
+        console.log('[System instructions loaded from docs/system.md]');
+      } else {
+        console.log('[No system instructions found at docs/system.md]');
+      }
+    } catch (error) {
+      console.log(`[Error loading system instructions: ${error.message}]`);
+    }
   }
 
   setupReadline() {
@@ -44,7 +71,9 @@ class OllamaChat {
 
     // Handle Ctrl+L to clear conversation history
     if (key.ctrl && key.name === 'l') {
-      this.conversationHistory = [];
+      // Preserve system instructions while clearing conversation
+      const systemMessages = this.conversationHistory.filter(msg => msg.role === 'system');
+      this.conversationHistory = systemMessages;
       process.stdout.write('\n[Conversation history cleared]\n');
       this.showPrompt();
       return;
@@ -178,12 +207,177 @@ class OllamaChat {
     process.stdout.write(`\r\x1b[${promptLen + currentLinePos}C`);
   }
 
-  async sendMessage(message) {
-    // Add user message to conversation history
-    this.conversationHistory.push({
-      role: 'user',
-      content: message
+  // XML parsing helper to extract function calls
+  extractFunctionCalls(text) {
+    const functionCallRegex = /<function_calls>([\s\S]*?)<\/function_calls>/g;
+    const calls = [];
+    let match;
+
+    while ((match = functionCallRegex.exec(text)) !== null) {
+      const xmlContent = match[1];
+      try {
+        const parser = new xml2js.Parser({ explicitArray: false });
+        parser.parseString(`<root>${xmlContent}</root>`, (err, result) => {
+          if (!err && result.root.invoke) {
+            const invokes = Array.isArray(result.root.invoke) ? result.root.invoke : [result.root.invoke];
+            for (const invoke of invokes) {
+              if (invoke.$ && invoke.$.name && invoke.parameter) {
+                const params = {};
+                const parameters = Array.isArray(invoke.parameter) ? invoke.parameter : [invoke.parameter];
+                for (const param of parameters) {
+                  if (param.$ && param.$.name) {
+                    params[param.$.name] = param._;
+                  }
+                }
+                calls.push({
+                  name: invoke.$.name,
+                  parameters: params
+                });
+              }
+            }
+          }
+        });
+      } catch (e) {
+        console.error('Error parsing XML:', e);
+      }
+    }
+
+    return calls;
+  }
+
+  // Execute terminal command
+  async runInTerminal(command, explanation, isBackground = false) {
+    console.log(`\n[Executing: ${explanation}]`);
+    console.log(`Command: ${command}\n`);
+
+    return new Promise((resolve) => {
+      // Determine shell based on OS
+      const isWindows = process.platform === 'win32';
+      const shell = isWindows ? 'cmd.exe' : '/bin/bash';
+      const shellArgs = isWindows ? ['/c', command] : ['-c', command];
+
+      const childProcess = spawn(shell, shellArgs, {
+        stdio: ['pipe', 'pipe', 'pipe'],
+        shell: false
+      });
+
+      let stdout = '';
+      let stderr = '';
+
+      // Collect output
+      childProcess.stdout.on('data', (data) => {
+        const output = data.toString();
+        stdout += output;
+        if (!isBackground) {
+          process.stdout.write(output);
+        }
+      });
+
+      childProcess.stderr.on('data', (data) => {
+        const output = data.toString();
+        stderr += output;
+        if (!isBackground) {
+          process.stderr.write(output);
+        }
+      });
+
+      if (isBackground) {
+        // Store background process
+        const processId = this.nextProcessId++;
+        this.backgroundProcesses.set(processId, {
+          process: childProcess,
+          stdout: '',
+          stderr: '',
+          command: command,
+          explanation: explanation,
+          startTime: new Date(),
+          isRunning: true
+        });
+
+        // Continue collecting output for background process
+        childProcess.stdout.on('data', (data) => {
+          const process = this.backgroundProcesses.get(processId);
+          if (process) {
+            process.stdout += data.toString();
+          }
+        });
+
+        childProcess.stderr.on('data', (data) => {
+          const process = this.backgroundProcesses.get(processId);
+          if (process) {
+            process.stderr += data.toString();
+          }
+        });
+
+        childProcess.on('close', (code) => {
+          const process = this.backgroundProcesses.get(processId);
+          if (process) {
+            process.isRunning = false;
+            process.exitCode = code;
+            process.endTime = new Date();
+          }
+        });
+
+        resolve(`Terminal started with ID: ${processId}`);
+      } else {
+        // Wait for immediate process to complete
+        childProcess.on('close', (code) => {
+          const combinedOutput = stdout + (stderr ? `\nSTDERR:\n${stderr}` : '');
+          const result = combinedOutput || `Process completed with exit code: ${code}`;
+          resolve(result);
+        });
+
+        childProcess.on('error', (error) => {
+          resolve(`Error executing command: ${error.message}`);
+        });
+      }
     });
+  }
+
+  // Get output from background process
+  getTerminalOutput(processId) {
+    const process = this.backgroundProcesses.get(parseInt(processId));
+    if (!process) {
+      return `No process found with ID: ${processId}`;
+    }
+
+    const output = process.stdout + (process.stderr ? `\nSTDERR:\n${process.stderr}` : '');
+    const status = process.isRunning ? 'Running' : `Completed (exit code: ${process.exitCode})`;
+
+    return `Process ${processId} [${status}]:\nCommand: ${process.command}\n\nOutput:\n${output || '(no output yet)'}`;
+  }
+
+  // Process function calls from LLM response
+  async processFunctionCalls(responseText) {
+    const functionCalls = this.extractFunctionCalls(responseText);
+    let results = '';
+
+    for (const call of functionCalls) {
+      if (call.name === 'run_in_terminal') {
+        const command = call.parameters.command;
+        const explanation = call.parameters.explanation || 'Running command';
+        const isBackground = call.parameters.isBackground === 'true';
+
+        const result = await this.runInTerminal(command, explanation, isBackground);
+        results += `\n<function_results>\n${result}\n</function_results>\n`;
+      } else if (call.name === 'get_terminal_output') {
+        const processId = call.parameters.id;
+        const result = this.getTerminalOutput(processId);
+        results += `\n<function_results>\n${result}\n</function_results>\n`;
+      }
+    }
+
+    return results;
+  }
+
+  async sendMessage(message) {
+    // Add user message to conversation history (only if it's not empty)
+    if (message.trim()) {
+      this.conversationHistory.push({
+        role: 'user',
+        content: message
+      });
+    }
 
     try {
       const headers = {
@@ -252,8 +446,29 @@ class OllamaChat {
                     content: assistantResponse.trim()
                   });
                 }
-                process.stdout.write('\n');
-                this.showPrompt();
+
+                // Process any function calls in the response
+                this.processFunctionCalls(assistantResponse).then((functionResults) => {
+                  if (functionResults) {
+                    // Send function results back to the LLM for processing
+                    process.stdout.write(functionResults);
+
+                    // Add function results to conversation and get LLM's response
+                    this.conversationHistory.push({
+                      role: 'user',
+                      content: functionResults
+                    });
+
+                    // Recursively call sendMessage to get LLM's response to the function results
+                    setTimeout(() => {
+                      this.sendMessage('');
+                    }, 100);
+                    return;
+                  }
+
+                  process.stdout.write('\n');
+                  this.showPrompt();
+                });
                 return;
               }
             } catch (e) {
@@ -271,8 +486,29 @@ class OllamaChat {
             content: assistantResponse.trim()
           });
         }
-        process.stdout.write('\n');
-        this.showPrompt();
+
+        // Process any function calls in the response
+        this.processFunctionCalls(assistantResponse).then((functionResults) => {
+          if (functionResults) {
+            // Send function results back to the LLM for processing
+            process.stdout.write(functionResults);
+
+            // Add function results to conversation and get LLM's response
+            this.conversationHistory.push({
+              role: 'user',
+              content: functionResults
+            });
+
+            // Recursively call sendMessage to get LLM's response to the function results
+            setTimeout(() => {
+              this.sendMessage('');
+            }, 100);
+            return;
+          }
+
+          process.stdout.write('\n');
+          this.showPrompt();
+        });
       });
 
       reader.on('error', (err) => {

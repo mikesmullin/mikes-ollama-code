@@ -8,7 +8,8 @@
     "chat": "node ollama-chat.js"
   },
   "dependencies": {
-    "node-fetch": "^2.7.0"
+    "node-fetch": "^2.7.0",
+    "xml2js": "^0.6.2"
   },
   "bin": {
     "ollama-chat": "./ollama-chat.js"
