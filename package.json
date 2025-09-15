@@ -9,7 +9,8 @@
   },
   "dependencies": {
     "node-fetch": "^2.7.0",
-    "xml2js": "^0.6.2"
+    "xml2js": "^0.6.2",
+    "glob": "^10.3.0"
   },
   "bin": {
     "ollama-chat": "./ollama-chat.js"

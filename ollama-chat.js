@@ -7,6 +7,7 @@ const { spawn } = require('child_process');
 const xml2js = require('xml2js');
 const fs = require('fs');
 const path = require('path');
+const glob = require('glob');
 
 // Environment variables
 const OLLAMA_HOST = process.env.OLLAMA_BASE_URL || process.env.OLLAMA_HOST || 'http://localhost:11434';
@@ -39,6 +40,7 @@ class OllamaChat {
           content: systemContent
         });
         console.log('[System instructions loaded from docs/system.md]');
+        console.log('[File system operations: list_dir, file_search, grep_search, read_file, create_file, replace_string_in_file]');
       } else {
         console.log('[No system instructions found at docs/system.md]');
       }
@@ -347,6 +349,192 @@ class OllamaChat {
     return `Process ${processId} [${status}]:\nCommand: ${process.command}\n\nOutput:\n${output || '(no output yet)'}`;
   }
 
+  // File System Operations
+
+  // List directory contents
+  listDir(dirPath) {
+    try {
+      if (!fs.existsSync(dirPath)) {
+        return `Error: Directory "${dirPath}" does not exist.`;
+      }
+
+      const stats = fs.statSync(dirPath);
+      if (!stats.isDirectory()) {
+        return `Error: "${dirPath}" is not a directory.`;
+      }
+
+      const items = fs.readdirSync(dirPath);
+      const result = items.map(item => {
+        const itemPath = path.join(dirPath, item);
+        const itemStats = fs.statSync(itemPath);
+        return itemStats.isDirectory() ? `${item}/` : item;
+      });
+
+      return result.length > 0 ? result.join('\n') : '(empty directory)';
+    } catch (error) {
+      return `Error listing directory: ${error.message}`;
+    }
+  }
+
+  // Search for files by glob pattern
+  fileSearch(pattern, maxResults = 50) {
+    try {
+      // Use glob to find files matching the pattern
+      const files = glob.sync(pattern, {
+        cwd: process.cwd(),
+        ignore: ['node_modules/**', '.git/**', '**/*.log'],
+        nodir: false
+      });
+
+      if (files.length === 0) {
+        return `No files found matching pattern: ${pattern}`;
+      }
+
+      const limitedFiles = maxResults ? files.slice(0, maxResults) : files;
+      let result = limitedFiles.join('\n');
+
+      if (files.length > limitedFiles.length) {
+        result += `\n... and ${files.length - limitedFiles.length} more files (showing first ${maxResults})`;
+      }
+
+      return result;
+    } catch (error) {
+      return `Error searching files: ${error.message}`;
+    }
+  }
+
+  // Search for text within files (grep)
+  grepSearch(query, isRegexp = false, includePattern = '**/*', maxResults = 50) {
+    try {
+      const files = glob.sync(includePattern, {
+        cwd: process.cwd(),
+        ignore: ['node_modules/**', '.git/**', '**/*.log', '**/.*'],
+        nodir: true
+      });
+
+      const results = [];
+      const searchRegex = isRegexp ? new RegExp(query, 'i') : new RegExp(query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
+
+      for (const file of files) {
+        try {
+          const content = fs.readFileSync(file, 'utf8');
+          const lines = content.split('\n');
+
+          lines.forEach((line, index) => {
+            if (searchRegex.test(line)) {
+              results.push(`${file}:${index + 1}:${line.trim()}`);
+            }
+          });
+
+          if (results.length >= maxResults) break;
+        } catch (err) {
+          // Skip files that can't be read (binary files, permission issues, etc.)
+          continue;
+        }
+      }
+
+      if (results.length === 0) {
+        return `No matches found for: ${query}`;
+      }
+
+      const limitedResults = results.slice(0, maxResults);
+      let result = limitedResults.join('\n');
+
+      if (results.length > limitedResults.length) {
+        result += `\n... and ${results.length - limitedResults.length} more matches (showing first ${maxResults})`;
+      }
+
+      return result;
+    } catch (error) {
+      return `Error searching text: ${error.message}`;
+    }
+  }
+
+  // Read file contents
+  readFile(filePath, offset = null, limit = null) {
+    try {
+      if (!fs.existsSync(filePath)) {
+        return `Error: File "${filePath}" does not exist.`;
+      }
+
+      const stats = fs.statSync(filePath);
+      if (stats.isDirectory()) {
+        return `Error: "${filePath}" is a directory, not a file.`;
+      }
+
+      const content = fs.readFileSync(filePath, 'utf8');
+
+      if (offset !== null || limit !== null) {
+        const lines = content.split('\n');
+        const startLine = offset ? Math.max(0, offset - 1) : 0;
+        const endLine = limit ? Math.min(lines.length, startLine + limit) : lines.length;
+        const selectedLines = lines.slice(startLine, endLine);
+
+        return selectedLines.join('\n');
+      }
+
+      return content;
+    } catch (error) {
+      if (error.code === 'ENOENT') {
+        return `Error: File "${filePath}" not found.`;
+      } else if (error.code === 'EACCES') {
+        return `Error: Permission denied reading "${filePath}".`;
+      } else {
+        return `Error reading file: ${error.message}`;
+      }
+    }
+  }
+
+  // Create new file
+  createFile(filePath, content) {
+    try {
+      // Create directory if it doesn't exist
+      const dir = path.dirname(filePath);
+      if (!fs.existsSync(dir)) {
+        fs.mkdirSync(dir, { recursive: true });
+      }
+
+      // Check if file already exists
+      if (fs.existsSync(filePath)) {
+        return `Error: File "${filePath}" already exists. Use replace_string_in_file to edit existing files.`;
+      }
+
+      fs.writeFileSync(filePath, content, 'utf8');
+      return `File created successfully: ${filePath}`;
+    } catch (error) {
+      return `Error creating file: ${error.message}`;
+    }
+  }
+
+  // Replace string in existing file
+  replaceStringInFile(filePath, oldString, newString) {
+    try {
+      if (!fs.existsSync(filePath)) {
+        return `Error: File "${filePath}" does not exist.`;
+      }
+
+      const content = fs.readFileSync(filePath, 'utf8');
+
+      // Check if the old string exists in the file
+      if (!content.includes(oldString)) {
+        return `Error: The specified text was not found in the file. Make sure the oldString matches exactly, including whitespace and line breaks.`;
+      }
+
+      // Count occurrences to warn about multiple matches
+      const occurrences = (content.match(new RegExp(oldString.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g')) || []).length;
+      if (occurrences > 1) {
+        return `Error: Found ${occurrences} occurrences of the text. Please provide more specific context to ensure unique replacement.`;
+      }
+
+      const newContent = content.replace(oldString, newString);
+      fs.writeFileSync(filePath, newContent, 'utf8');
+
+      return `File updated successfully: ${filePath}`;
+    } catch (error) {
+      return `Error replacing string in file: ${error.message}`;
+    }
+  }
+
   // Process function calls from LLM response
   async processFunctionCalls(responseText) {
     const functionCalls = this.extractFunctionCalls(responseText);
@@ -363,6 +551,39 @@ class OllamaChat {
       } else if (call.name === 'get_terminal_output') {
         const processId = call.parameters.id;
         const result = this.getTerminalOutput(processId);
+        results += `\n<function_results>\n${result}\n</function_results>\n`;
+      } else if (call.name === 'list_dir') {
+        const dirPath = call.parameters.path;
+        const result = this.listDir(dirPath);
+        results += `\n<function_results>\n${result}\n</function_results>\n`;
+      } else if (call.name === 'file_search') {
+        const query = call.parameters.query;
+        const maxResults = call.parameters.maxResults ? parseInt(call.parameters.maxResults) : 50;
+        const result = this.fileSearch(query, maxResults);
+        results += `\n<function_results>\n${result}\n</function_results>\n`;
+      } else if (call.name === 'grep_search') {
+        const query = call.parameters.query;
+        const isRegexp = call.parameters.isRegexp === 'true';
+        const includePattern = call.parameters.includePattern || '**/*';
+        const maxResults = call.parameters.maxResults ? parseInt(call.parameters.maxResults) : 50;
+        const result = this.grepSearch(query, isRegexp, includePattern, maxResults);
+        results += `\n<function_results>\n${result}\n</function_results>\n`;
+      } else if (call.name === 'read_file') {
+        const filePath = call.parameters.filePath;
+        const offset = call.parameters.offset ? parseInt(call.parameters.offset) : null;
+        const limit = call.parameters.limit ? parseInt(call.parameters.limit) : null;
+        const result = this.readFile(filePath, offset, limit);
+        results += `\n<function_results>\n${result}\n</function_results>\n`;
+      } else if (call.name === 'create_file') {
+        const filePath = call.parameters.filePath;
+        const content = call.parameters.content || '';
+        const result = this.createFile(filePath, content);
+        results += `\n<function_results>\n${result}\n</function_results>\n`;
+      } else if (call.name === 'replace_string_in_file') {
+        const filePath = call.parameters.filePath;
+        const oldString = call.parameters.oldString;
+        const newString = call.parameters.newString;
+        const result = this.replaceStringInFile(filePath, oldString, newString);
         results += `\n<function_results>\n${result}\n</function_results>\n`;
       }
     }
@@ -524,12 +745,23 @@ class OllamaChat {
   }
 }
 
-// Check if node-fetch is available, if not provide installation instructions
-try {
-  require.resolve('node-fetch');
-} catch (e) {
-  console.error('Error: node-fetch package is required but not installed.');
-  console.error('Please install it by running: npm install node-fetch');
+// Check if required packages are available
+const requiredPackages = ['node-fetch', 'xml2js', 'glob'];
+const missingPackages = [];
+
+for (const pkg of requiredPackages) {
+  try {
+    require.resolve(pkg);
+  } catch (e) {
+    missingPackages.push(pkg);
+  }
+}
+
+if (missingPackages.length > 0) {
+  console.error('Error: Required packages are missing:');
+  missingPackages.forEach(pkg => console.error(`  - ${pkg}`));
+  console.error('\nPlease install them by running:');
+  console.error(`npm install ${missingPackages.join(' ')}`);
   process.exit(1);
 }
 
