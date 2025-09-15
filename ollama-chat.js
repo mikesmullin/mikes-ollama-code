@@ -86,8 +86,46 @@ class OllamaChat {
     this.isPasting = false;
     this.pasteThreshold = 10; // Milliseconds between keypress events to consider it pasting
 
+    // Logging setup
+    this.startTime = new Date();
+    this.setupLogging();
+
     this.loadSystemInstructions(); // Load system instructions on startup
     this.setupReadline();
+  }
+
+  setupLogging() {
+    // Create logs directory if it doesn't exist
+    const logsDir = path.join(__dirname, 'logs');
+    if (!fs.existsSync(logsDir)) {
+      fs.mkdirSync(logsDir, { recursive: true });
+    }
+
+    // Create log file with timestamp
+    const timestamp = this.startTime.toISOString().replace(/[:.]/g, '-').replace('T', '_').split('.')[0];
+    this.logFilePath = path.join(logsDir, `chat_${timestamp}.log`);
+
+    // Initialize log file
+    fs.writeFileSync(this.logFilePath, `=== Ollama Chat Session Started at ${this.startTime.toISOString()} ===\n`, 'utf8');
+  }
+
+  getElapsedTime() {
+    const elapsed = Date.now() - this.startTime.getTime();
+    const seconds = (elapsed / 1000).toFixed(3);
+    return `[+${seconds}s]`;
+  }
+
+  writeToStdout(text) {
+    // Write to stdout
+    process.stdout.write(text);
+
+    // Also write to log file with timestamp
+    try {
+      const timestamp = this.getElapsedTime();
+      fs.appendFileSync(this.logFilePath, `${timestamp} ${text}`, 'utf8');
+    } catch (error) {
+      // Silently ignore logging errors to avoid disrupting the main flow
+    }
   }
 
   loadSystemInstructions() {
@@ -132,7 +170,7 @@ class OllamaChat {
 
     // Handle Ctrl+C to exit
     if (key.ctrl && key.name === 'c') {
-      process.stdout.write('\n');
+      this.writeToStdout('\n');
       process.exit(0);
     }
 
@@ -143,7 +181,7 @@ class OllamaChat {
       this.conversationHistory = systemMessages;
       // Reset stream state
       this.streamState = null;
-      process.stdout.write('\n' + this.formatSystemMessage('Conversation history cleared') + '\n');
+      this.writeToStdout('\n' + this.formatSystemMessage('Conversation history cleared') + '\n');
       this.showPrompt();
       return;
     }
@@ -188,12 +226,12 @@ class OllamaChat {
     // Handle regular Enter to send message (only if not pasting)
     if ((key.name === 'return' || key.name === 'enter') && !key.alt && !key.ctrl && !key.meta && !this.isPasting) {
       if (this.currentInput.trim()) {
-        process.stdout.write('\n');
+        this.writeToStdout('\n');
         this.sendMessage(this.currentInput);
         this.currentInput = '';
         this.cursorPos = 0;
       } else {
-        process.stdout.write('\n');
+        this.writeToStdout('\n');
         this.showPrompt();
       }
       this.lastKeypressTime = currentTime;
@@ -336,7 +374,7 @@ class OllamaChat {
     const displayInput = this.currentInput.replace(/\n/g, '\n... ');
     const coloredPrompt = this.formatUserInput(prompt);
     const coloredInput = this.formatUserInput(displayInput);
-    process.stdout.write(coloredPrompt + coloredInput);
+    this.writeToStdout(coloredPrompt + coloredInput);
 
     // Calculate cursor position after newlines
     const lines = this.currentInput.slice(0, this.cursorPos).split('\n');
@@ -368,12 +406,15 @@ class OllamaChat {
     return `\n${header}\n${content}\n${footer}\n`;
   }
 
-  formatLLMResponse(text) {
+  formatLLMThinkingInline(text) {
+    // Simple inline thinking format - just colored text, no frames
+    return `${Colors.RESET}${Colors.LLM_THINKING}${text}${Colors.RESET}`;
+  } formatLLMResponse(text) {
     return `${Colors.LLM_RESPONSE}${text}${Colors.RESET}`;
   }
 
   formatFunctionCall(text) {
-    const header = `${Colors.FUNCTION_CALL}${Colors.BRIGHT}╔═ FUNCTION CALL ═══════════════════════════════════════╗${Colors.RESET}`;
+    const header = `${Colors.RESET}${Colors.FUNCTION_CALL}${Colors.BRIGHT}╔═ FUNCTION CALL ═══════════════════════════════════════╗${Colors.RESET}`;
     const footer = `${Colors.FUNCTION_CALL}${Colors.BRIGHT}╚═══════════════════════════════════════════════════════╝${Colors.RESET}`;
     const lines = text.split('\n');
     const content = lines.map(line =>
@@ -867,45 +908,53 @@ class OllamaChat {
       const parts = this.streamState.regularContent.split('<think>');
       const beforeThink = parts[0];
       if (beforeThink) {
-        process.stdout.write(this.formatLLMResponse(beforeThink));
+        this.writeToStdout(this.formatLLMResponse(beforeThink));
       }
 
-      // Start thinking mode
+      // Start thinking mode - output any content immediately after <think>
       this.streamState.isInThinkingTag = true;
-      this.streamState.thinkingContent = parts.slice(1).join('<think>');
+      const afterThink = parts.slice(1).join('<think>');
       this.streamState.regularContent = '';
+
+      // Process content after the <think> tag immediately
+      if (afterThink) {
+        this.processStreamContent(afterThink);
+      }
 
       // Debug log
       console.log(this.formatSystemMessage('DEBUG: Started thinking mode'));
+      return;
     }
 
     if (this.streamState.isInThinkingTag) {
-      // Add new content to thinking buffer
-      this.streamState.thinkingContent += content;
+      // Check if this content contains the closing tag
+      if (content.includes('</think>')) {
+        // Split on closing tag
+        const parts = content.split('</think>');
+        const thinkingPart = parts[0];
+        const afterThinking = parts.slice(1).join('</think>');
 
-      if (this.streamState.thinkingContent.includes('</think>')) {
-        // End of thinking tag
-        const parts = this.streamState.thinkingContent.split('</think>');
-        const thinkingText = parts[0];
-
-        // Display thinking content with special formatting
-        if (thinkingText.trim()) {
-          process.stdout.write(this.formatLLMThinking(thinkingText));
+        // Output thinking content immediately with inline formatting
+        if (thinkingPart) {
+          this.writeToStdout(this.formatLLMThinkingInline(thinkingPart));
         }
 
-        // Continue with content after thinking tag
+        // End thinking mode - add newline and reset colors to separate from next content
         this.streamState.isInThinkingTag = false;
-        this.streamState.thinkingContent = '';
-        this.streamState.regularContent = parts.slice(1).join('</think>');
+        this.writeToStdout(`${Colors.RESET}\n`);
 
-        // Process any remaining content recursively
-        if (this.streamState.regularContent) {
+        // Process content after thinking tag
+        if (afterThinking) {
+          this.streamState.regularContent = afterThinking;
           const remaining = this.streamState.regularContent;
           this.streamState.regularContent = '';
           this.processStreamContent(remaining);
         }
+      } else {
+        // Still in thinking mode, output content immediately with thinking color
+        this.writeToStdout(this.formatLLMThinkingInline(content));
       }
-      return; // Don't output thinking content directly
+      return;
     }
 
     // Check for function calls
@@ -914,7 +963,7 @@ class OllamaChat {
       const parts = this.streamState.regularContent.split('<function_calls>');
       const beforeFunction = parts[0];
       if (beforeFunction) {
-        process.stdout.write(this.formatLLMResponse(beforeFunction));
+        this.writeToStdout(this.formatLLMResponse(beforeFunction));
       }
 
       // Start function call mode
@@ -936,7 +985,8 @@ class OllamaChat {
         const functionCallText = parts[0] + '</function_calls>';
 
         // Display function call with special formatting
-        process.stdout.write(this.formatFunctionCall(functionCallText));
+        this.writeToStdout(Colors.RESET);
+        this.writeToStdout(this.formatFunctionCall(functionCallText));
 
         // Continue with content after function call
         this.streamState.isInFunctionCall = false;
@@ -955,7 +1005,9 @@ class OllamaChat {
 
     // Regular LLM response content
     if (this.streamState.regularContent && !this.streamState.isInThinkingTag && !this.streamState.isInFunctionCall) {
-      process.stdout.write(this.formatLLMResponse(this.streamState.regularContent));
+      if (!this.streamState.regularContent.includes('<function_calls>') && !this.streamState.regularContent.includes('</function_calls>')) {
+        this.writeToStdout(this.formatLLMResponse(this.streamState.regularContent));
+      }
       this.streamState.regularContent = '';
     }
   }
@@ -1012,14 +1064,11 @@ class OllamaChat {
             if (data === '[DONE]') {
               // Handle any remaining content in stream state
               if (this.streamState) {
-                if (this.streamState.isInThinkingTag && this.streamState.thinkingContent) {
-                  process.stdout.write(this.formatLLMThinking(this.streamState.thinkingContent));
-                }
                 if (this.streamState.isInFunctionCall && this.streamState.functionCallContent) {
-                  process.stdout.write(this.formatFunctionCall(this.streamState.functionCallContent));
+                  this.writeToStdout(this.formatFunctionCall(this.streamState.functionCallContent));
                 }
                 if (this.streamState.regularContent) {
-                  process.stdout.write(this.formatLLMResponse(this.streamState.regularContent));
+                  this.writeToStdout(this.formatLLMResponse(this.streamState.regularContent));
                 }
               }
 
@@ -1030,12 +1079,10 @@ class OllamaChat {
                   content: assistantResponse.trim()
                 });
               }
-              process.stdout.write('\n');
+              this.writeToStdout('\n');
               this.showPrompt();
               return;
-            }
-
-            try {
+            } try {
               const parsed = JSON.parse(data);
               const content = parsed.choices?.[0]?.delta?.content;
               if (content) {
@@ -1059,7 +1106,7 @@ class OllamaChat {
                 this.processFunctionCalls(assistantResponse).then((functionResults) => {
                   if (functionResults) {
                     // Send function results back to the LLM for processing
-                    process.stdout.write(this.formatFunctionResult(functionResults));
+                    this.writeToStdout(this.formatFunctionResult(functionResults));
 
                     // Add function results to conversation and get LLM's response
                     this.conversationHistory.push({
@@ -1074,7 +1121,7 @@ class OllamaChat {
                     return;
                   }
 
-                  process.stdout.write('\n');
+                  this.writeToStdout('\n');
                   this.showPrompt();
                 });
                 return;
@@ -1099,7 +1146,7 @@ class OllamaChat {
         // Only show prompt if no function calls were processed
         // (function call processing handles its own prompt display)
         if (!this.extractFunctionCalls(assistantResponse).length) {
-          process.stdout.write('\n');
+          this.writeToStdout('\n');
           this.showPrompt();
         }
       }); reader.on('error', (err) => {
@@ -1114,7 +1161,7 @@ class OllamaChat {
   }
 
   showPrompt() {
-    process.stdout.write(this.formatUserInput('>>> '));
+    this.writeToStdout(this.formatUserInput('>>> '));
   }
 
   start() {

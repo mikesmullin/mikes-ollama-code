@@ -1,0 +1,22 @@
+NAME
+      cli - Command Line Interface
+
+SYNOPSIS
+      cli [OPTIONS] [COMMAND]
+
+DESCRIPTION
+      A powerful command line interface with the following scripts available:
+
+QUICK REFERENCE
+      +-------------------+----------------------------+------------------+
+      | COMMAND           | DESCRIPTION                | GET MORE HELP    |
+      +-------------------+----------------------------+------------------+
+      | search            | Search for content         | search --help    |
+      +-------------------+----------------------------+------------------+
+
+OPTIONS
+      --help             Show this help message and exit
+
+SEE ALSO
+      For detailed information about each command, run:
+      $ cli COMMAND --help

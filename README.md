@@ -1,4 +1,10 @@
-## Running from windows
+# ollama-code
+
+
+## Run Ollama Server from Windows 11
+
+In my case, it's important that it can accept connections from WSL2 Ubuntu environment.
+That's so the small LLM can focus on only composing Linux commands.
 
 ```
 ollama stop qwen:8b
@@ -6,14 +12,22 @@ set OLLAMA_HOST="0.0.0.0"
 ollama serve
 ```
 
+## Connect from WSL2 Ubuntu (remote)
+
+```sh
+./llm.sh
+```
+
 ---
-## Setup Podman in WSL2
+
+## (Optional) Setup Podman in WSL2
 
 ```sh
 # from windows
 podman machine start
+```
 
-
+```sh
 # from wsl2 ubuntu
 sudo apt install podman-remote
 alias podman=podman-remote
